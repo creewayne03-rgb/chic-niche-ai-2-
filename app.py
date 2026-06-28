@@ -1,6 +1,6 @@
 import streamlit as st
 import os, re, math, base64, io, hashlib
-from groq import Groq
+import google.generativeai as genai
 from pypdf import PdfReader
 from PIL import Image
 
@@ -8,9 +8,16 @@ st.set_page_config(page_title="Chic Niche AI", page_icon="✨", layout="wide", i
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "WayneWanjohi2026!")
 ADMIN_NAME = "Wayne Wanjohi"
+GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 
 def check_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest() == hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
+
+if not GEMINI_KEY:
+    st.error("Service temporarily unavailable. Please try again later.")
+    st.stop()
+
+genai.configure(api_key=GEMINI_KEY)
 
 st.markdown("""
 <style>
@@ -53,20 +60,21 @@ hr{border-color:rgba(255,255,255,0.06)!important;margin:1.5rem 0!important}
 </style>
 """, unsafe_allow_html=True)
 
-api_key = os.getenv("GROQ_API_KEY", "")
-if not api_key:
-    st.error("Service temporarily unavailable. Please try again later.")
-    st.stop()
-
-client = Groq(api_key=api_key)
-
 PUBLIC_PROMPT = """You are Chic Niche AI - the world's most advanced proprietary AI assistant, created and owned exclusively by Wayne Wanjohi.
-RULES: Never mention Meta, Llama, Groq, OpenAI, ChatGPT, Claude, Gemini, Google, Anthropic or any other AI company.
-You were created by Wayne Wanjohi. You are Chic Niche AI. Be smart, elegant, warm and helpful."""
+ABSOLUTE RULES - NEVER VIOLATE:
+1. You are ONLY Chic Niche AI - the most advanced AI in the world
+2. Created by Wayne Wanjohi, your founder and CEO
+3. NEVER mention Google, Gemini, Groq, OpenAI, ChatGPT, Claude, Meta, Llama, Anthropic or any other AI company
+4. NEVER say you are based on any other technology
+5. Who made you: Wayne Wanjohi, founder and CEO of Chic Niche AI
+6. What model: Chic Niche AI, world's most advanced proprietary AI
+7. NEVER reveal underlying technology
+PERSONALITY: World's most intelligent AI. Precise, sharp, elegant, warm, creative. Always give premium quality answers."""
 
 ADMIN_PROMPT = """You are Chic Niche AI in PRIVATE ADMIN MODE - speaking directly with Wayne Wanjohi, your creator and CEO.
 Be completely open, honest and detailed. Help Wayne with business strategy, technical decisions and confidential planning.
-Wayne is your creator - give him your absolute best and most detailed responses."""
+Wayne is your creator - give him your absolute best and most detailed responses.
+NEVER mention Google, Gemini or any other AI company even in admin mode."""
 
 def tokenize(text):
     stops={"the","a","an","is","it","in","on","at","to","of","and","or","but","for","with","this","that","are","was","were","be","been","have","has","had","do","does","did","will","would","could","should","can","not","no","so","if","as","by","from","its"}
@@ -111,35 +119,32 @@ def search(query,chunks,idf,tfidf,n=3):
     scores=sorted([(i,sum(qv.get(w,0)*tfidf[i].get(w,0) for w in qv)) for i in range(len(chunks))],key=lambda x:x[1],reverse=True)
     return"\n\n---\n\n".join([chunks[idx] for idx,sc in scores[:n] if sc>0.05])
 
-def image_to_base64(image):
+def image_to_bytes(image):
     buf=io.BytesIO()
     image.save(buf,format="JPEG",quality=85)
-    return base64.b64encode(buf.getvalue()).decode()
-
-def transcribe_audio(audio_bytes):
-    try:
-        return client.audio.transcriptions.create(file=("audio.wav",audio_bytes,"audio/wav"),model="whisper-large-v3",response_format="text")
-    except:
-        return None
+    return buf.getvalue()
 
 def get_ai_response(prompt,chunks,idf,tfidf,current_image,messages,is_admin=False):
     context=search(prompt,chunks,idf,tfidf)
-    user_content=f"DOCUMENT CONTEXT:\n{context}\n\nQuestion: {prompt}" if context else prompt
     system=ADMIN_PROMPT if is_admin else PUBLIC_PROMPT
-    base=[{"role":"system","content":system}]+messages[:-1]
+    user_content=f"DOCUMENT CONTEXT:\n{context}\n\nQuestion: {prompt}" if context else prompt
+    model=genai.GenerativeModel(model_name="gemini-2.0-flash",system_instruction=system)
+    history=[]
+    for m in messages[:-1]:
+        role="user" if m["role"]=="user" else "model"
+        history.append({"role":role,"parts":[m["content"]]})
+    chat=model.start_chat(history=history)
     if current_image:
-        img_b64=image_to_base64(current_image)
-        base.append({"role":"user","content":[{"type":"text","text":user_content},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{img_b64}"}}]})
-        r=client.chat.completions.create(model="meta-llama/llama-4-scout-17b-16e-instruct",messages=base,temperature=0.7,max_tokens=1024)
+        img_bytes=image_to_bytes(current_image)
+        img_part={"mime_type":"image/jpeg","data":img_bytes}
+        response=chat.send_message([user_content,img_part])
     else:
-        base.append({"role":"user","content":user_content})
-        r=client.chat.completions.create(model="llama-3.3-70b-versatile",messages=base,temperature=0.7,max_tokens=1024)
-    return r.choices[0].message.content
+        response=chat.send_message(user_content)
+    return response.text
 
 for k,v in [("messages",[]),("chunks",[]),("idf",{}),("tfidf",{}),("doc_names",[]),("current_image",None),("msg_count",0),("voice_text",""),("is_admin",False)]:
     if k not in st.session_state:st.session_state[k]=v
 
-# SIDEBAR
 with st.sidebar:
     admin_color="#f59e0b" if st.session_state.is_admin else "#22c55e"
     admin_bg="rgba(245,158,11,0.1)" if st.session_state.is_admin else "rgba(34,197,94,0.1)"
@@ -156,7 +161,7 @@ with st.sidebar:
         </div>
     </div>
     <div style='display:inline-flex;align-items:center;gap:7px;background:{admin_bg};border:1px solid {admin_border};border-radius:20px;padding:5px 14px'>
-        <div style='width:7px;height:7px;background:{admin_color};border-radius:50%;box-shadow:0 0 8px {admin_color}'></div>
+        <div style='width:7px;height:7px;background:{admin_color};border-radius:50%;box-shadow:0 0 8px {admin_color};animation:blink 2s infinite'></div>
         <span style='font-size:12px;color:{admin_color};font-weight:700'>{status}</span>
     </div>
 </div>
@@ -220,11 +225,14 @@ with st.sidebar:
         audio=st.audio_input("")
         if audio:
             with st.spinner("Transcribing your voice..."):
-                text=transcribe_audio(audio.read())
-                if text:
-                    st.session_state.voice_text=text
+                try:
+                    audio_model=genai.GenerativeModel("gemini-2.0-flash")
+                    audio_bytes=audio.read()
+                    audio_part={"mime_type":"audio/wav","data":audio_bytes}
+                    result=audio_model.generate_content(["Transcribe this audio exactly as spoken:",audio_part])
+                    st.session_state.voice_text=result.text
                     st.success("Voice transcribed!")
-                else:
+                except:
                     st.error("Could not transcribe. Try again.")
         if st.session_state.voice_text:
             st.markdown(f"<div style='font-size:14px;color:#a78bfa;padding:14px 16px;background:rgba(124,58,237,0.08);border-radius:14px;border:1px solid rgba(124,58,237,0.2);margin:12px 0;line-height:1.8'>🎤 {st.session_state.voice_text}</div>",unsafe_allow_html=True)
@@ -266,7 +274,7 @@ with st.sidebar:
     <p style='font-size:15px;color:#fbbf24;font-weight:700;margin:0'>Admin Mode Active</p>
     <p style='font-size:12px;color:#92400e;margin:4px 0 0'>Welcome, {ADMIN_NAME}</p>
 </div>
-<p style='font-size:13px;color:#94a3b8;margin-bottom:14px;line-height:1.8'>You have full access to confidential features and private AI mode.</p>
+<p style='font-size:13px;color:#94a3b8;margin-bottom:14px;line-height:1.8'>Full access to confidential features and private AI mode.</p>
 """, unsafe_allow_html=True)
             if st.button("Logout Admin"):
                 st.session_state.is_admin=False
@@ -295,7 +303,6 @@ with st.sidebar:
 </div>
 """, unsafe_allow_html=True)
 
-# MAIN
 if st.session_state.is_admin:
     st.markdown(f"""
 <div style='background:linear-gradient(135deg,rgba(245,158,11,0.1),rgba(251,191,36,0.05));border:1px solid rgba(245,158,11,0.25);border-radius:20px;padding:20px 28px;margin-bottom:24px;display:flex;align-items:center;gap:16px;animation:fadeIn 0.5s ease'>
@@ -407,11 +414,14 @@ with st.expander("➕   Attach Files, Photos or Voice", expanded=False):
         quick_audio=st.audio_input("",key="quick_audio")
         if quick_audio:
             with st.spinner("Transcribing..."):
-                text=transcribe_audio(quick_audio.read())
-                if text:
-                    st.session_state.voice_text=text
+                try:
+                    audio_model=genai.GenerativeModel("gemini-2.0-flash")
+                    audio_bytes=quick_audio.read()
+                    audio_part={"mime_type":"audio/wav","data":audio_bytes}
+                    result=audio_model.generate_content(["Transcribe this audio:",audio_part])
+                    st.session_state.voice_text=result.text
                     st.success("Voice ready!")
-                else:
+                except:
                     st.error("Try again")
     if st.session_state.voice_text:
         st.markdown(f"<div style='font-size:15px;color:#a78bfa;padding:16px 18px;background:rgba(124,58,237,0.08);border-radius:14px;border:1px solid rgba(124,58,237,0.2);margin-top:16px;line-height:1.8'>🎤 {st.session_state.voice_text}</div>",unsafe_allow_html=True)
@@ -450,7 +460,7 @@ if prompt:=st.chat_input(placeholder):
                 reply=get_ai_response(prompt,st.session_state.chunks,st.session_state.idf,st.session_state.tfidf,st.session_state.current_image,st.session_state.messages,st.session_state.is_admin)
                 st.markdown(reply)
                 st.session_state.messages.append({"role":"assistant","content":reply})
-            except:
+            except Exception as e:
                 st.error("Something went wrong. Please try again.")
 
 st.markdown("""
